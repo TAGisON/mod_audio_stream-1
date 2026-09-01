@@ -1,18 +1,21 @@
 --[[
   Coral AI voice bot — one orchestrator session per call.
 
-  Dialplan (extension 101 or any inbound):
+  Dialplan:
     <action application="lua" data="ai_voice_bot.lua"/>
 
-  Optional channel vars (set before lua):
-    ai_orch_url      default http://192.168.100.150:8011
-    ai_profile_id    default coral-tfn
-    ai_peer_rate     default 8000
+  Channel vars (optional, set before lua):
+    ai_orch_url        default http://192.168.100.150:8011
+    ai_profile_id      explicit profile; wins over DID map
+    ai_profile_map     "101=coral-tfn,1800=coral-tfn"  or JSON {"101":"coral-tfn"}
+    ai_profiles_file   path to dest→profile file (see ai_profiles.conf)
+    ai_peer_rate       default 8000
 ]]
 
 local ORCH_DEFAULT = "http://192.168.100.150:8011"
 local PROFILE_DEFAULT = "coral-tfn"
 local PEER_RATE_DEFAULT = "8000"
+local DEFAULT_MAP_FILE = "/etc/coraltele/sipserver/scripts/ai_profiles.conf"
 
 local function log(level, msg)
   freeswitch.consoleLog(level, "[ai_voice_bot] " .. msg .. "\n")
@@ -20,7 +23,17 @@ end
 
 local function json_escape(s)
   if not s then return "" end
-  return (tostring(s):gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n"))
+  return (tostring(s):gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", "\\n"):gsub("\r", ""))
+end
+
+local function jstr(s)
+  return '"' .. json_escape(s or "") .. '"'
+end
+
+local function var(name)
+  local v = session:getVariable(name)
+  if v == nil or v == "" then return "" end
+  return tostring(v)
 end
 
 local function curl_post(url, body)
@@ -41,29 +54,119 @@ local function curl_post(url, body)
   return resp, nil
 end
 
+local function add_pair(map, dest, pid)
+  dest = dest and dest:gsub("^%s+", ""):gsub("%s+$", "") or ""
+  pid = pid and pid:gsub("^%s+", ""):gsub("%s+$", "") or ""
+  if dest ~= "" and pid ~= "" then
+    map[dest] = pid
+  end
+end
+
+local function parse_profile_map(s, map)
+  if not s or s == "" then return map end
+  s = s:gsub("^%s+", ""):gsub("%s+$", "")
+  if s:sub(1, 1) == "{" then
+    for dest, pid in s:gmatch('"([^"]+)"%s*:%s*"([^"]+)"') do
+      add_pair(map, dest, pid)
+    end
+    return map
+  end
+  for pair in (s .. ","):gmatch("([^,]+),") do
+    local dest, pid = pair:match("^%s*([^=]+)%s*=%s*(%S+)%s*$")
+    add_pair(map, dest, pid)
+  end
+  return map
+end
+
+local function load_profile_file(path, map)
+  if not path or path == "" then return map end
+  local f = io.open(path, "r")
+  if not f then return map end
+  for line in f:lines() do
+    line = line:gsub("#.*$", ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if line ~= "" then
+      local dest, pid = line:match("^([^=%s]+)%s*=%s*(%S+)$")
+      if not dest then
+        dest, pid = line:match("^(%S+)%s+(%S+)$")
+      end
+      add_pair(map, dest, pid)
+    end
+  end
+  f:close()
+  return map
+end
+
+local function resolve_profile(dest)
+  local explicit = var("ai_profile_id")
+  if explicit ~= "" then
+    return explicit, "channel:ai_profile_id"
+  end
+  local map = {}
+  load_profile_file(var("ai_profiles_file"), map)
+  load_profile_file(DEFAULT_MAP_FILE, map)
+  parse_profile_map(var("ai_profile_map"), map)
+  if dest ~= "" and map[dest] then
+    return map[dest], "did_map:" .. dest
+  end
+  return PROFILE_DEFAULT, "default"
+end
+
 if not session then
   log("ERR", "no session — run from dialplan only")
   return
 end
 
-local orch = session:getVariable("ai_orch_url") or ORCH_DEFAULT
+local orch = var("ai_orch_url")
+if orch == "" then orch = ORCH_DEFAULT end
 orch = orch:gsub("/+$", "")
-local profile = session:getVariable("ai_profile_id") or PROFILE_DEFAULT
-local peer_rate = session:getVariable("ai_peer_rate") or PEER_RATE_DEFAULT
-local uuid = session:get_uuid()
-local ani = session:getVariable("caller_id_number") or ""
+
+local peer_rate = var("ai_peer_rate")
+if peer_rate == "" then peer_rate = PEER_RATE_DEFAULT end
+
+local uuid = session:get_uuid() or ""
+local ani = var("caller_id_number")
+local dest = var("destination_number")
+if dest == "" then dest = var("sip_to_user") end
+local profile, profile_src = resolve_profile(dest)
+
+local sip_call_id = var("sip_call_id")
+if sip_call_id == "" then sip_call_id = var("sip_h_X-coral_sbc_callid") end
+
+local caller_json = string.format(
+  '{"ani":%s,"caller_id_name":%s,"network_addr":%s,"sip_from_user":%s,"sip_from_host":%s}',
+  jstr(ani),
+  jstr(var("caller_id_name")),
+  jstr(var("network_addr") ~= "" and var("network_addr") or var("sip_network_ip")),
+  jstr(var("sip_from_user")),
+  jstr(var("sip_from_host"))
+)
+
+local meta_json = string.format(
+  '{"edge":"mod_audio_stream","call_uuid":%s,"sip_call_id":%s,"destination":%s,"context":%s,"direction":%s,"accountcode":%s,"chan_name":%s,"profile_source":%s,"peer_rate":%s}',
+  jstr(uuid),
+  jstr(sip_call_id),
+  jstr(dest),
+  jstr(var("context")),
+  jstr(var("call_direction") ~= "" and var("call_direction") or var("coral_call_direction")),
+  jstr(var("accountcode") ~= "" and var("accountcode") or var("coral_accountcode")),
+  jstr(var("chan_name")),
+  jstr(profile_src),
+  jstr(peer_rate)
+)
 
 if not session:answered() then
   session:answer()
 end
 
 local create_body = string.format(
-  '{"profile_id":"%s","profile_version":"latest","clock":"live","caller":"%s"}',
-  json_escape(profile),
-  json_escape(ani)
+  '{"profile_id":%s,"profile_version":"latest","clock":"live","caller":%s,"metadata":%s}',
+  jstr(profile),
+  caller_json,
+  meta_json
 )
 
-log("INFO", "creating session profile=" .. profile .. " ani=" .. ani)
+log("INFO", "creating session profile=" .. profile .. " via=" .. profile_src ..
+  " ani=" .. ani .. " dest=" .. dest .. " uuid=" .. uuid)
 local resp, err = curl_post(orch .. "/v1/sessions", create_body)
 if err or not resp or resp == "" then
   log("ERR", "session create failed: " .. tostring(err or "empty"))
@@ -80,9 +183,9 @@ if not sid or not tok then
 end
 
 session:setVariable("ai_session_id", sid)
+session:setVariable("ai_profile_id", profile)
 log("INFO", "session " .. sid)
 
--- Must be set before uuid_audio_stream start (read at init).
 session:setVariable("STREAM_INJECT_BUFFER_MS", "8000")
 
 local orch_host = orch:match("^https?://([^/]+)")
@@ -108,17 +211,15 @@ if not stream_res or stream_res:match("^%-ERR") then
   return
 end
 
--- WRITE_REPLACE only fires while the channel has a write stream.
 api:execute("uuid_broadcast", uuid .. " silence_stream://-1 aleg")
 
-local ans_resp, ans_err = curl_post(orch .. "/v1/sessions/" .. sid .. "/answer", "{}")
+local _, ans_err = curl_post(orch .. "/v1/sessions/" .. sid .. "/answer", "{}")
 if ans_err then
   log("WARNING", "answer failed: " .. tostring(ans_err))
 else
   log("INFO", "answer ok")
 end
 
--- Keep call up until caller hangs up; mod_audio_stream owns media.
 session:setAutoHangup(false)
 while session:ready() do
   session:sleep(500)
