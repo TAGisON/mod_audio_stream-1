@@ -5,8 +5,9 @@ Each call using `ai_voice_bot.lua`:
 1. Resolve **profile** from DID map (or `ai_profile_id`)
 2. `POST /v1/sessions` with **caller** + **metadata** (ANI, dest, FS UUID, SIP Call-ID)
 3. `uuid_audio_stream` → WebSocket to `/edge/fs`
-4. `POST /v1/sessions/{id}/answer`
-5. Hangup → `POST /v1/sessions/{id}/stop`
+4. Poll `GET /v1/sessions/{id}` until `media_phase=ready` (or welcoming/conversing)
+5. `POST /v1/sessions/{id}/answer`
+6. Hangup → `POST /v1/sessions/{id}/stop`
 
 ## Install on sipserver (voip)
 
@@ -38,7 +39,7 @@ Reload is not required for Lua/file edits (next call picks them up). After chang
 | `ai_profiles_file` | Alternate path to dest→profile file |
 | `/etc/coraltele/sipserver/scripts/ai_profiles.conf` | Default DID map |
 | default | `coral-tfn` (Coral Telecom Toll-Free Desk) |
-| `ai_orch_url` | default `http://192.168.100.150:8011` |
+| `ai_orch_url` | default `http://192.168.25.130:8011` (override per deploy) |
 | `ai_peer_rate` | default `8000` |
 
 Posted on session create (stored + `session.started` audit):
@@ -48,7 +49,7 @@ Posted on session create (stored + `session.started` audit):
 
 ## Test
 
-Call **101**. Supervisor: http://192.168.100.150:8011/supervisor/ — profile `coral-tfn`, caller/metadata on the session JSON.
+Call **101**. Supervisor: http://192.168.25.130:8011/supervisor/ — profile `coral-tfn`, caller/metadata on the session JSON.
 
 ```bash
 grep ai_voice_bot /etc/coraltele/sipserver/log/freeswitch.log | tail -20
