@@ -194,6 +194,8 @@ log("INFO", "session " .. sid)
 
 -- Keep inject buffer small so barge-in flush clears residual playout quickly (module: 40..5000).
 session:setVariable("STREAM_INJECT_BUFFER_MS", "500")
+-- Unbridged Lua legs: WRITE_REPLACE rarely fires; drain inject on READ instead.
+session:setVariable("STREAM_INJECT_READ", "1")
 
 local orch_host = orch:match("^https?://([^/]+)")
 if not orch_host then
@@ -219,20 +221,19 @@ if not stream_res or stream_res:match("^%-ERR") or stream_res:match("INVALID COM
 end
 
 -- Do NOT uuid_broadcast silence_stream (even via bgapi): it runs playback on the
--- channel and freezes session:sleep in this Lua script until hangup — /answer never
--- runs during the call. mod_audio_stream WRITE_REPLACE injects TTS without it.
--- Orch media is ready ~300ms after WSS hello; fixed settle is enough on voip.
-log("INFO", "media settle wait 1500ms")
-session:sleep(1500)
+-- channel and freezes session:sleep in this Lua script until hangup.
+-- TTS playout uses STREAM_INJECT_READ (module READ path), not silence_stream.
+log("INFO", "media settle wait 800ms")
+session:sleep(800)
 
-local ans_body, ans_err = curl_post(orch .. "/v1/sessions/" .. sid .. "/answer", "{}", 45)
-if ans_err then
-  log("WARNING", "answer failed: " .. tostring(ans_err))
-elseif ans_body and ans_body:match('"error"') then
-  log("WARNING", "answer rejected: " .. tostring(ans_body):sub(1, 300))
-else
-  log("INFO", "answer ok")
-end
+local answer_url = orch .. "/v1/sessions/" .. sid .. "/answer"
+local bg_ans = string.format(
+  "curl -sS %s -m 45 -X POST '%s' -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1",
+  CURL_OPTS,
+  answer_url:gsub("'", "'\\''")
+)
+api:execute("bgapi", "system " .. bg_ans)
+log("INFO", "answer dispatched (bgapi)")
 
 session:setAutoHangup(false)
 while session:ready() do

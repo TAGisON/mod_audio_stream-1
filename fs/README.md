@@ -9,7 +9,11 @@ Each call using `ai_voice_bot.lua`:
 5. `POST /v1/sessions/{id}/answer` — must run **while the call is still up**
 6. Hangup → `POST /v1/sessions/{id}/stop`
 
-**Do not** `uuid_broadcast silence_stream://-1` — even via `bgapi` it starts `playback` on the channel and freezes `session:sleep` in this Lua script until hangup, so `/answer` never runs during the call. `mod_audio_stream` injects TTS via `WRITE_REPLACE` on an answered call without it.
+**Do not** `uuid_broadcast silence_stream://-1` — even via `bgapi` it starts `playback` on the channel and freezes `session:sleep` in this Lua script until hangup.
+
+On **unbridged Lua-only** legs (no bridge, no playback), TTS playout needs **`STREAM_INJECT_READ=1`** (set in `ai_voice_bot.lua`). That drains the inject buffer on the media bug **READ** path and `write_frame`s PCM to the caller. Without it, `WRITE_REPLACE` may never run and the inject queue stays full (`inuse=8000`) with silence heard.
+
+`/answer` is dispatched via **`bgapi`** so welcome TTS is not blocked by a synchronous curl (~30s stalls were observed on voip).
 
 ## Install on sipserver (voip)
 
@@ -21,6 +25,12 @@ cp fs/ai_voice_bot.lua /etc/coraltele/sipserver/scripts/ai_voice_bot.lua
 cp fs/ai_profiles.conf /etc/coraltele/sipserver/scripts/ai_profiles.conf
 cp fs/ai_dialplan_101.py /etc/coraltele/sipserver/scripts/ai_dialplan_101.py
 chmod +x /etc/coraltele/sipserver/scripts/ai_dialplan_101.py
+
+# Rebuild module when C++ changes (STREAM_INJECT_READ / READ-path playout):
+make clean && make
+cp mod_audio_stream.so /usr/lib/freeswitch/mod/mod_audio_stream.so
+fs_cli -x "reload mod_audio_stream"
+# confirm v2.0.1 in log on next call: "mod_audio_stream 2.0.1 feeder/sink init"
 ```
 
 ### xml_curl dialplan service (port 8099) — required after reboot
@@ -106,18 +116,23 @@ Expected on a good call (stay on line 20+ s):
 
 ```
 [ai_voice_bot] uuid_audio_stream: +OK
-[ai_voice_bot] media settle wait 1500ms
-[ai_voice_bot] answer ok
+mod_audio_stream 2.0.1 feeder/sink init
+STREAM_INJECT_READ enabled (READ-path playout)
+[ai_voice_bot] media settle wait 800ms
+[ai_voice_bot] answer dispatched (bgapi)
 ```
 
-**Bad signs (stale Lua on voip):**
+Debug: inject `inuse=` should **fluctuate** (not stuck at 8000). On hangup, `inject stats: written=...` should show bytes written > 0.
+
+**Bad signs:**
 
 | FS log | Meaning |
 |---|---|
 | `playback(silence_stream://-1)` at depth=1 | Old script — blocks Lua until hangup |
 | `media ready (poll N/10)` | Old poll loop — redeploy `ai_voice_bot.lua` |
-| `answer ok` missing during call | `/answer` ran after hangup → no audio |
-| No `streamAudio queued` in FS debug | Orchestrator TTS never reached inject buffer in time |
+| `inject accepted (v2.0.0)` only, no `STREAM_INJECT_READ` | Old `.so` — rebuild and reload module |
+| `inuse=8000` pegged whole call | Inject not draining — need `STREAM_INJECT_READ` + v2.0.1 module |
+| `answer ok` at hangup after ~30s | Old sync curl — redeploy Lua with bgapi answer |
 
 After redeploy, confirm deployed file has **no** `uuid_broadcast` / `wait_media_ready`:
 

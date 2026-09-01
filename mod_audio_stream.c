@@ -52,10 +52,20 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
         if (tech_pvt->close_requested) {
             return SWITCH_FALSE;
         }
-        return stream_frame(bug);
+        {
+            switch_bool_t ok = stream_frame(bug);
+            if (tech_pvt->inject_read_mode) {
+                playout_inject_frame(bug);
+            }
+            return ok;
+        }
 
     case SWITCH_ABC_TYPE_WRITE_REPLACE:
         {
+            if (tech_pvt && tech_pvt->inject_read_mode) {
+                break;
+            }
+
             switch_frame_t *frame =
                 switch_core_media_bug_get_write_replace_frame(bug);
 

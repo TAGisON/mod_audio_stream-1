@@ -60,6 +60,10 @@ struct private_data {
     int inject_sample_rate;
     int inject_bytes_per_sample;
     int inject_buffer_ms;
+    /* When set, drain inject_buffer on READ and write_frame to caller (unbridged Lua legs). */
+    int inject_read_mode:1;
+    switch_codec_t inject_play_codec;
+    int inject_play_codec_ready:1;
 
     /* Diagnostics counters (best-effort; __atomic_* in .c / .cpp). */
     uint64_t inject_bytes_written;

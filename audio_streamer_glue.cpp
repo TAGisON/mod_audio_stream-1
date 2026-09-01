@@ -14,7 +14,7 @@
 #include <cstdint>
 #include <cctype>
 
-#define MOD_AUDIO_STREAM_VERSION "2.0.0"
+#define MOD_AUDIO_STREAM_VERSION "2.0.1"
 
 #define FRAME_SIZE_8000  320
 #define MAX_AUDIO_BASE64_LEN (256 * 1024) /* realtime frames only; reject huge blobs */
@@ -826,6 +826,20 @@ namespace {
 
     void destroy_tech_pvt(private_t* tech_pvt) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "%s destroy_tech_pvt\n", tech_pvt->sessionId);
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+            "%s inject stats: written=%" SWITCH_UINT64_T_FMT " read=%" SWITCH_UINT64_T_FMT
+            " starved=%" SWITCH_UINT64_T_FMT " lock_miss=%" SWITCH_UINT64_T_FMT
+            " overflow_drops=%" SWITCH_UINT64_T_FMT "\n",
+            tech_pvt->sessionId,
+            (switch_uint64_t)__atomic_load_n(&tech_pvt->inject_bytes_written, __ATOMIC_RELAXED),
+            (switch_uint64_t)__atomic_load_n(&tech_pvt->inject_bytes_read, __ATOMIC_RELAXED),
+            (switch_uint64_t)__atomic_load_n(&tech_pvt->inject_frames_starved, __ATOMIC_RELAXED),
+            (switch_uint64_t)__atomic_load_n(&tech_pvt->inject_lock_misses, __ATOMIC_RELAXED),
+            (switch_uint64_t)__atomic_load_n(&tech_pvt->inject_overflow_drops, __ATOMIC_RELAXED));
+        if (tech_pvt->inject_play_codec_ready) {
+            switch_core_codec_destroy(&tech_pvt->inject_play_codec);
+            tech_pvt->inject_play_codec_ready = 0;
+        }
         if (tech_pvt->resampler) {
             speex_resampler_destroy(tech_pvt->resampler);
             tech_pvt->resampler = nullptr;
@@ -1064,6 +1078,13 @@ extern "C" {
             return SWITCH_STATUS_FALSE;
         }
 
+        if (switch_channel_var_true(channel, "STREAM_INJECT_READ")) {
+            tech_pvt->inject_read_mode = 1;
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                              "(%s) STREAM_INJECT_READ enabled (READ-path playout)\n",
+                              switch_core_session_get_uuid(session));
+        }
+
         *ppUserData = tech_pvt;
 
         return SWITCH_STATUS_SUCCESS;
@@ -1222,6 +1243,76 @@ extern "C" {
             if (!chunk.empty()) {
                 streamer->writeBinary(chunk.data(), chunk.size());
             }
+        }
+
+        return SWITCH_TRUE;
+    }
+
+    switch_bool_t playout_inject_frame(switch_media_bug_t *bug) {
+        switch_core_session_t *session = switch_core_media_bug_get_session(bug);
+        private_t *tech_pvt = (private_t *)switch_core_media_bug_get_user_data(bug);
+
+        if (!session || !tech_pvt || tech_pvt->cleanup_started || !tech_pvt->inject_buffer) {
+            return SWITCH_TRUE;
+        }
+
+        const int rate = tech_pvt->inject_sample_rate > 0 ? tech_pvt->inject_sample_rate : 8000;
+        const int ch = tech_pvt->channels > 0 ? tech_pvt->channels : 1;
+        const int frame_ms = tech_pvt->frame_ms > 0 ? tech_pvt->frame_ms : FRAME_MS_DEFAULT;
+        const size_t frame_bytes = (size_t)rate * 2u * (size_t)ch / 1000u * (size_t)frame_ms;
+        if (frame_bytes == 0 || frame_bytes > SWITCH_RECOMMENDED_BUFFER_SIZE) {
+            return SWITCH_TRUE;
+        }
+
+        uint8_t pcm[SWITCH_RECOMMENDED_BUFFER_SIZE];
+        switch_size_t got = 0;
+
+        if (switch_mutex_trylock(tech_pvt->inject_mutex ? tech_pvt->inject_mutex : tech_pvt->mutex)
+            == SWITCH_STATUS_SUCCESS) {
+            if (switch_buffer_inuse(tech_pvt->inject_buffer) >= frame_bytes) {
+                got = switch_buffer_read(tech_pvt->inject_buffer, pcm, frame_bytes);
+            }
+            switch_mutex_unlock(tech_pvt->inject_mutex ? tech_pvt->inject_mutex : tech_pvt->mutex);
+        } else {
+            __atomic_fetch_add(&tech_pvt->inject_lock_misses, 1, __ATOMIC_RELAXED);
+        }
+
+        if (got == 0) {
+            __atomic_fetch_add(&tech_pvt->inject_frames_starved, 1, __ATOMIC_RELAXED);
+            return SWITCH_TRUE;
+        }
+
+        if (!tech_pvt->inject_play_codec_ready) {
+            switch_memory_pool_t *pool = switch_core_session_get_pool(session);
+            if (switch_core_codec_init(&tech_pvt->inject_play_codec,
+                                       "L16",
+                                       NULL,
+                                       NULL,
+                                       rate,
+                                       frame_ms,
+                                       ch,
+                                       SWITCH_CODEC_FLAG_ENCODE | SWITCH_CODEC_FLAG_DECODE,
+                                       NULL,
+                                       pool) != SWITCH_STATUS_SUCCESS) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                                  "(%s) inject playout codec init failed\n", tech_pvt->sessionId);
+                return SWITCH_TRUE;
+            }
+            tech_pvt->inject_play_codec_ready = 1;
+        }
+
+        switch_frame_t write_frame = {};
+        write_frame.data = pcm;
+        write_frame.buflen = sizeof(pcm);
+        write_frame.datalen = got;
+        write_frame.samples = (uint32_t)(got / (2u * (size_t)ch));
+        write_frame.rate = rate;
+        write_frame.channels = ch;
+        write_frame.codec = &tech_pvt->inject_play_codec;
+
+        if (switch_core_session_write_frame(session, &write_frame, SWITCH_IO_FLAG_NONE, 0)
+            == SWITCH_STATUS_SUCCESS) {
+            __atomic_fetch_add(&tech_pvt->inject_bytes_written, (uint64_t)got, __ATOMIC_RELAXED);
         }
 
         return SWITCH_TRUE;
