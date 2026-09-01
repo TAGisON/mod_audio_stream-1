@@ -8,7 +8,7 @@
   <condition field="destination_number" expression="^101$">
     <action application="set" data="hangup_after_bridge=false"/>
     <action application="set" data="ai_orch_url=http://192.168.100.150:8011"/>
-    <action application="set" data="ai_profile_id=coral-cc"/>
+    <action application="set" data="ai_profile_id=coral-tfn"/>
     <action application="set" data="ai_peer_rate=8000"/>
     <action application="lua" data="ai_voice_bot.lua"/>
   </condition>

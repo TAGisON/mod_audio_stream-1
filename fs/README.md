@@ -35,7 +35,7 @@ fs_cli -x "reloadxml"
 | Variable | Default | Meaning |
 |---|---|---|
 | `ai_orch_url` | `http://192.168.100.150:8011` | Control API base |
-| `ai_profile_id` | `coral-cc` | Published profile |
+| `ai_profile_id` | `coral-tfn` | Published desk (Coral Telecom Toll-Free Desk) |
 | `ai_peer_rate` | `8000` | PCM rate for mod_audio_stream |
 
 ## Test

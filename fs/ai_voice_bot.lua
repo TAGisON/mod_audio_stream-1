@@ -6,12 +6,12 @@
 
   Optional channel vars (set before lua):
     ai_orch_url      default http://192.168.100.150:8011
-    ai_profile_id    default coral-cc
+    ai_profile_id    default coral-tfn
     ai_peer_rate     default 8000
 ]]
 
 local ORCH_DEFAULT = "http://192.168.100.150:8011"
-local PROFILE_DEFAULT = "coral-cc"
+local PROFILE_DEFAULT = "coral-tfn"
 local PEER_RATE_DEFAULT = "8000"
 
 local function log(level, msg)
