@@ -36,9 +36,12 @@ local function var(name)
   return tostring(v)
 end
 
-local function curl_post(url, body)
+-- timeout_sec: curl -m (create=8, answer=45 — welcome TTS may take several seconds)
+local function curl_post(url, body, timeout_sec)
+  local m = tonumber(timeout_sec) or 8
   local cmd = string.format(
-    "curl -sS -m 8 -X POST '%s' -H 'Content-Type: application/json' -d '%s' 2>&1",
+    "curl -sS -m %d -X POST '%s' -H 'Content-Type: application/json' -d '%s' 2>&1",
+    m,
     url:gsub("'", "'\\''"),
     body:gsub("'", "'\\''")
   )
@@ -167,7 +170,7 @@ local create_body = string.format(
 
 log("INFO", "creating session profile=" .. profile .. " via=" .. profile_src ..
   " ani=" .. ani .. " dest=" .. dest .. " uuid=" .. uuid)
-local resp, err = curl_post(orch .. "/v1/sessions", create_body)
+local resp, err = curl_post(orch .. "/v1/sessions", create_body, 8)
 if err or not resp or resp == "" then
   log("ERR", "session create failed: " .. tostring(err or "empty"))
   session:hangup("NORMAL_TEMPORARY_FAILURE")
@@ -186,8 +189,8 @@ session:setVariable("ai_session_id", sid)
 session:setVariable("ai_profile_id", profile)
 log("INFO", "session " .. sid)
 
--- Module accepts 40..5000 ms (default 500). Set before uuid_audio_stream start.
-session:setVariable("STREAM_INJECT_BUFFER_MS", "5000")
+-- Keep inject buffer small so barge-in flush clears residual playout quickly (module: 40..5000).
+session:setVariable("STREAM_INJECT_BUFFER_MS", "500")
 
 local orch_host = orch:match("^https?://([^/]+)")
 if not orch_host then
@@ -205,19 +208,21 @@ local api = freeswitch.API()
 local stream_cmd = string.format("%s start %s mono %s", uuid, ws_uri, peer_rate)
 local stream_res = api:execute("uuid_audio_stream", stream_cmd)
 log("INFO", "uuid_audio_stream: " .. tostring(stream_res))
-if not stream_res or stream_res:match("^%-ERR") then
-  log("ERR", "audio stream start failed")
-  curl_post(orch .. "/v1/sessions/" .. sid .. "/stop", '{"reason":"stream_failed"}')
+if not stream_res or stream_res:match("^%-ERR") or stream_res:match("INVALID COMMAND") then
+  log("ERR", "audio stream start failed: " .. tostring(stream_res))
+  curl_post(orch .. "/v1/sessions/" .. sid .. "/stop", '{"reason":"stream_failed"}', 8)
   session:hangup("NORMAL_TEMPORARY_FAILURE")
   return
 end
 
-api:execute("uuid_broadcast", uuid .. " silence_stream://-1 aleg")
+-- MUST be non-blocking. Synchronous uuid_broadcast of silence_stream://-1 holds Lua until
+-- hangup, so /answer never runs during the call (welcome never plays).
+api:execute("bgapi", "uuid_broadcast " .. uuid .. " silence_stream://-1 aleg")
 
 -- Brief wait so edge WSS can attach before welcome Speak.
-session:sleep(300)
+session:sleep(400)
 
-local ans_body, ans_err = curl_post(orch .. "/v1/sessions/" .. sid .. "/answer", "{}")
+local ans_body, ans_err = curl_post(orch .. "/v1/sessions/" .. sid .. "/answer", "{}", 45)
 if ans_err then
   log("WARNING", "answer failed: " .. tostring(ans_err))
 elseif ans_body and ans_body:match('"error"') then
@@ -232,5 +237,5 @@ while session:ready() do
 end
 
 log("INFO", "call ended, stopping session " .. sid)
-curl_post(orch .. "/v1/sessions/" .. sid .. "/stop", '{"reason":"hangup"}')
+curl_post(orch .. "/v1/sessions/" .. sid .. "/stop", '{"reason":"hangup"}', 8)
 api:execute("uuid_audio_stream", uuid .. " stop")
