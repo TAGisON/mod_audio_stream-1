@@ -16,6 +16,8 @@ local ORCH_DEFAULT = "http://192.168.25.130:8011"
 local PROFILE_DEFAULT = "coral-tfn"
 local PEER_RATE_DEFAULT = "8000"
 local DEFAULT_MAP_FILE = "/etc/coraltele/sipserver/scripts/ai_profiles.conf"
+-- Avoid curl HTTP keep-alive stalls on voip (2nd GET can block ~60s without this).
+local CURL_OPTS = "-H 'Connection: close' --no-keepalive"
 
 local function log(level, msg)
   freeswitch.consoleLog(level, "[ai_voice_bot] " .. msg .. "\n")
@@ -40,7 +42,8 @@ end
 local function curl_post(url, body, timeout_sec)
   local m = tonumber(timeout_sec) or 8
   local cmd = string.format(
-    "curl -sS -m %d -X POST '%s' -H 'Content-Type: application/json' -d '%s' 2>&1",
+    "curl -sS %s -m %d -X POST '%s' -H 'Content-Type: application/json' -d '%s' 2>&1",
+    CURL_OPTS,
     m,
     url:gsub("'", "'\\''"),
     body:gsub("'", "'\\''")
@@ -215,53 +218,14 @@ if not stream_res or stream_res:match("^%-ERR") or stream_res:match("INVALID COM
   return
 end
 
--- MUST be non-blocking. Synchronous uuid_broadcast of silence_stream://-1 holds Lua until
--- hangup, so /answer never runs during the call (welcome never plays).
-api:execute("bgapi", "uuid_broadcast " .. uuid .. " silence_stream://-1 aleg")
+-- Do NOT uuid_broadcast silence_stream (even via bgapi): it runs playback on the
+-- channel and freezes session:sleep in this Lua script until hangup — /answer never
+-- runs during the call. mod_audio_stream WRITE_REPLACE injects TTS without it.
+-- Orch media is ready ~300ms after WSS hello; fixed settle is enough on voip.
+log("INFO", "media settle wait 1500ms")
+session:sleep(1500)
 
--- Brief wait so edge WSS can attach; poll orch until media ready (LIVE_TALK WP0).
-local function curl_get(url, timeout_sec)
-  local m = tonumber(timeout_sec) or 5
-  local cmd = string.format(
-    "curl -sS -m %d -X GET '%s' 2>&1",
-    m,
-    url:gsub("'", "'\\''")
-  )
-  local handle = io.popen(cmd)
-  if not handle then
-    return nil, "io.popen failed"
-  end
-  local resp = handle:read("*a") or ""
-  local ok, _, code = handle:close()
-  if not ok then
-    return nil, "curl exit " .. tostring(code) .. ": " .. resp
-  end
-  return resp, nil
-end
-
-local function wait_media_ready(sid, timeout_ms)
-  local deadline = (os.time() * 1000) + (tonumber(timeout_ms) or 5000)
-  while (os.time() * 1000) < deadline do
-    local body, err = curl_get(orch .. "/v1/sessions/" .. sid, 3)
-    if body and body:match('"media_phase"%s*:%s*"ready"') then
-      return true
-    end
-    if body and body:match('"media_phase"%s*:%s*"welcoming"') then
-      return true
-    end
-    if body and body:match('"media_phase"%s*:%s*"conversing"') then
-      return true
-    end
-    session:sleep(100)
-  end
-  log("WARNING", "media ready poll timed out; proceeding with settle fallback")
-  session:sleep(500)
-  return false
-end
-
-wait_media_ready(sid, 5000)
-
-local ans_body, ans_err = curl_post(orch .. "/v1/sessions/" .. sid .. "/answer", "{}", 30)
+local ans_body, ans_err = curl_post(orch .. "/v1/sessions/" .. sid .. "/answer", "{}", 45)
 if ans_err then
   log("WARNING", "answer failed: " .. tostring(ans_err))
 elseif ans_body and ans_body:match('"error"') then
