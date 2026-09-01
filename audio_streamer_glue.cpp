@@ -307,12 +307,12 @@ private:
             if (drop > (size_t)inuse_before) drop = (size_t)inuse_before;
             if (drop > 0) {
                 drop_oldest_from_buffer(tech_pvt->inject_buffer, (switch_size_t)drop);
-                atomic_fetch_add(&tech_pvt->inject_overflow_drops, (unsigned long long)drop);
+                __atomic_fetch_add(&tech_pvt->inject_overflow_drops, (uint64_t)drop, __ATOMIC_RELAXED);
             }
         }
 
         switch_buffer_write(tech_pvt->inject_buffer, pcm, (switch_size_t)nbytes);
-        atomic_fetch_add(&tech_pvt->inject_bytes_written, (unsigned long long)nbytes);
+        __atomic_fetch_add(&tech_pvt->inject_bytes_written, (uint64_t)nbytes, __ATOMIC_RELAXED);
         return true;
     }
 
@@ -361,7 +361,7 @@ private:
         }
 
         if (switch_mutex_trylock(tech_pvt->inject_mutex ? tech_pvt->inject_mutex : tech_pvt->mutex) != SWITCH_STATUS_SUCCESS) {
-            atomic_fetch_add(&tech_pvt->inject_lock_misses, 1);
+            __atomic_fetch_add(&tech_pvt->inject_lock_misses, 1, __ATOMIC_RELAXED);
             switch_core_session_rwunlock(psession);
             return;
         }
@@ -697,7 +697,7 @@ private:
 
         if (switch_mutex_trylock(tech_pvt->inject_mutex) != SWITCH_STATUS_SUCCESS) {
             push_err(out, m_sessionId, "processMessage - injector busy");
-            atomic_fetch_add(&tech_pvt->inject_lock_misses, 1);
+            __atomic_fetch_add(&tech_pvt->inject_lock_misses, 1, __ATOMIC_RELAXED);
             return out;
         }
 

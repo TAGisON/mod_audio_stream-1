@@ -79,18 +79,18 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
                 inuse_now = switch_buffer_inuse(tech_pvt->inject_buffer);
                 switch_mutex_unlock(tech_pvt->inject_mutex ? tech_pvt->inject_mutex : tech_pvt->mutex);
             } else {
-                atomic_fetch_add(&tech_pvt->inject_lock_misses, 1);
+                __atomic_fetch_add(&tech_pvt->inject_lock_misses, 1, __ATOMIC_RELAXED);
             }
 
             if (got < need) {
                 memset(((unsigned char *)frame->data) + got, 0, need - got);
-                atomic_fetch_add(&tech_pvt->inject_frames_starved, 1);
+                __atomic_fetch_add(&tech_pvt->inject_frames_starved, 1, __ATOMIC_RELAXED);
             }
 
             switch_core_media_bug_set_write_replace_frame(bug, frame);
 
             if (got > 0) {
-                atomic_fetch_add(&tech_pvt->inject_bytes_read, (unsigned long long)got);
+                __atomic_fetch_add(&tech_pvt->inject_bytes_read, (uint64_t)got, __ATOMIC_RELAXED);
             }
 
             /* Rate-limited stats via channel private timestamp would need extra state;

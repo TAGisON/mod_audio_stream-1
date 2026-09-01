@@ -3,7 +3,7 @@
 
 #include <switch.h>
 #include <speex/speex_resampler.h>
-#include <stdatomic.h>
+#include <stdint.h>
 
 #define MY_BUG_NAME        "audio_stream"
 #define MAX_SESSION_ID     (256)
@@ -61,12 +61,12 @@ struct private_data {
     int inject_bytes_per_sample;
     int inject_buffer_ms;
 
-    /* Diagnostics counters (best-effort). */
-    atomic_ullong inject_bytes_written;
-    atomic_ullong inject_bytes_read;
-    atomic_ullong inject_frames_starved;
-    atomic_ullong inject_lock_misses;
-    atomic_ullong inject_overflow_drops;
+    /* Diagnostics counters (best-effort; __atomic_* in .c / .cpp). */
+    uint64_t inject_bytes_written;
+    uint64_t inject_bytes_read;
+    uint64_t inject_frames_starved;
+    uint64_t inject_lock_misses;
+    uint64_t inject_overflow_drops;
 };
 
 typedef struct private_data private_t;
