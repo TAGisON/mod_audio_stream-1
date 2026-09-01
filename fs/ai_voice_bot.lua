@@ -82,6 +82,9 @@ end
 session:setVariable("ai_session_id", sid)
 log("INFO", "session " .. sid)
 
+-- Must be set before uuid_audio_stream start (read at init).
+session:setVariable("STREAM_INJECT_BUFFER_MS", "8000")
+
 local orch_host = orch:match("^https?://([^/]+)")
 if not orch_host then
   log("ERR", "invalid ai_orch_url: " .. orch)
@@ -104,6 +107,9 @@ if not stream_res or stream_res:match("^%-ERR") then
   session:hangup("NORMAL_TEMPORARY_FAILURE")
   return
 end
+
+-- WRITE_REPLACE only fires while the channel has a write stream.
+api:execute("uuid_broadcast", uuid .. " silence_stream://-1 aleg")
 
 local ans_resp, ans_err = curl_post(orch .. "/v1/sessions/" .. sid .. "/answer", "{}")
 if ans_err then
