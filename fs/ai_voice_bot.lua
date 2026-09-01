@@ -186,7 +186,8 @@ session:setVariable("ai_session_id", sid)
 session:setVariable("ai_profile_id", profile)
 log("INFO", "session " .. sid)
 
-session:setVariable("STREAM_INJECT_BUFFER_MS", "8000")
+-- Module accepts 40..5000 ms (default 500). Set before uuid_audio_stream start.
+session:setVariable("STREAM_INJECT_BUFFER_MS", "5000")
 
 local orch_host = orch:match("^https?://([^/]+)")
 if not orch_host then
@@ -213,9 +214,14 @@ end
 
 api:execute("uuid_broadcast", uuid .. " silence_stream://-1 aleg")
 
-local _, ans_err = curl_post(orch .. "/v1/sessions/" .. sid .. "/answer", "{}")
+-- Brief wait so edge WSS can attach before welcome Speak.
+session:sleep(300)
+
+local ans_body, ans_err = curl_post(orch .. "/v1/sessions/" .. sid .. "/answer", "{}")
 if ans_err then
   log("WARNING", "answer failed: " .. tostring(ans_err))
+elseif ans_body and ans_body:match('"error"') then
+  log("WARNING", "answer rejected: " .. tostring(ans_body):sub(1, 300))
 else
   log("INFO", "answer ok")
 end
