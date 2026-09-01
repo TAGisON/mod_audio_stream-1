@@ -1,0 +1,48 @@
+# Build outputs
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+Testing/
+
+# IDE / editor
+.idea/
+.vscode/
+*.user
+*.suo
+*.sw?
+
+# Compiled artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exp
+*.pdb
+
+# Packaging / local scratch
+_packages/
+_packages
+*.deb
+*.tar.gz
+
+# Python (if any test helpers added later)
+.pytest_cache/
+__pycache__/
+*.pyc
+
+# Secrets / local env
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
