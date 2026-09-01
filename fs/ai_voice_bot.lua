@@ -219,10 +219,49 @@ end
 -- hangup, so /answer never runs during the call (welcome never plays).
 api:execute("bgapi", "uuid_broadcast " .. uuid .. " silence_stream://-1 aleg")
 
--- Brief wait so edge WSS can attach before welcome Speak.
-session:sleep(400)
+-- Brief wait so edge WSS can attach; poll orch until media ready (LIVE_TALK WP0).
+local function curl_get(url, timeout_sec)
+  local m = tonumber(timeout_sec) or 5
+  local cmd = string.format(
+    "curl -sS -m %d -X GET '%s' 2>&1",
+    m,
+    url:gsub("'", "'\\''")
+  )
+  local handle = io.popen(cmd)
+  if not handle then
+    return nil, "io.popen failed"
+  end
+  local resp = handle:read("*a") or ""
+  local ok, _, code = handle:close()
+  if not ok then
+    return nil, "curl exit " .. tostring(code) .. ": " .. resp
+  end
+  return resp, nil
+end
 
-local ans_body, ans_err = curl_post(orch .. "/v1/sessions/" .. sid .. "/answer", "{}", 45)
+local function wait_media_ready(sid, timeout_ms)
+  local deadline = (os.time() * 1000) + (tonumber(timeout_ms) or 5000)
+  while (os.time() * 1000) < deadline do
+    local body, err = curl_get(orch .. "/v1/sessions/" .. sid, 3)
+    if body and body:match('"media_phase"%s*:%s*"ready"') then
+      return true
+    end
+    if body and body:match('"media_phase"%s*:%s*"welcoming"') then
+      return true
+    end
+    if body and body:match('"media_phase"%s*:%s*"conversing"') then
+      return true
+    end
+    session:sleep(100)
+  end
+  log("WARNING", "media ready poll timed out; proceeding with settle fallback")
+  session:sleep(500)
+  return false
+end
+
+wait_media_ready(sid, 5000)
+
+local ans_body, ans_err = curl_post(orch .. "/v1/sessions/" .. sid .. "/answer", "{}", 30)
 if ans_err then
   log("WARNING", "answer failed: " .. tostring(ans_err))
 elseif ans_body and ans_body:match('"error"') then
