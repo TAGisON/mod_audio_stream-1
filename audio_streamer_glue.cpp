@@ -827,15 +827,13 @@ namespace {
     void destroy_tech_pvt(private_t* tech_pvt) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "%s destroy_tech_pvt\n", tech_pvt->sessionId);
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-            "%s inject stats: written=%" SWITCH_UINT64_T_FMT " read=%" SWITCH_UINT64_T_FMT
-            " starved=%" SWITCH_UINT64_T_FMT " lock_miss=%" SWITCH_UINT64_T_FMT
-            " overflow_drops=%" SWITCH_UINT64_T_FMT "\n",
+            "%s inject stats: written=%llu read=%llu starved=%llu lock_miss=%llu overflow_drops=%llu\n",
             tech_pvt->sessionId,
-            (switch_uint64_t)__atomic_load_n(&tech_pvt->inject_bytes_written, __ATOMIC_RELAXED),
-            (switch_uint64_t)__atomic_load_n(&tech_pvt->inject_bytes_read, __ATOMIC_RELAXED),
-            (switch_uint64_t)__atomic_load_n(&tech_pvt->inject_frames_starved, __ATOMIC_RELAXED),
-            (switch_uint64_t)__atomic_load_n(&tech_pvt->inject_lock_misses, __ATOMIC_RELAXED),
-            (switch_uint64_t)__atomic_load_n(&tech_pvt->inject_overflow_drops, __ATOMIC_RELAXED));
+            (unsigned long long)__atomic_load_n(&tech_pvt->inject_bytes_written, __ATOMIC_RELAXED),
+            (unsigned long long)__atomic_load_n(&tech_pvt->inject_bytes_read, __ATOMIC_RELAXED),
+            (unsigned long long)__atomic_load_n(&tech_pvt->inject_frames_starved, __ATOMIC_RELAXED),
+            (unsigned long long)__atomic_load_n(&tech_pvt->inject_lock_misses, __ATOMIC_RELAXED),
+            (unsigned long long)__atomic_load_n(&tech_pvt->inject_overflow_drops, __ATOMIC_RELAXED));
         if (tech_pvt->inject_play_codec_ready) {
             switch_core_codec_destroy(&tech_pvt->inject_play_codec);
             tech_pvt->inject_play_codec_ready = 0;
