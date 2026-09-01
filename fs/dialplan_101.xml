@@ -1,0 +1,15 @@
+<!--
+  Snippet: AI voice bot on extension 101.
+  Merge into your dialplan (e.g. public.xml or Coral xml_curl source).
+
+  Requires: mod_lua, mod_audio_stream, mod_curl (curl CLI on PATH for lua io.popen).
+-->
+<extension name="coral_ai_voice_101">
+  <condition field="destination_number" expression="^101$">
+    <action application="set" data="hangup_after_bridge=false"/>
+    <action application="set" data="ai_orch_url=http://192.168.100.150:8011"/>
+    <action application="set" data="ai_profile_id=coral-cc"/>
+    <action application="set" data="ai_peer_rate=8000"/>
+    <action application="lua" data="ai_voice_bot.lua"/>
+  </condition>
+</extension>
