@@ -5,14 +5,14 @@
     <action application="lua" data="ai_voice_bot.lua"/>
 
   Channel vars (optional, set before lua):
-    ai_orch_url        default http://192.168.25.130:8011  (set channel var on FS if IP differs)
+    ai_orch_url        default http://192.168.100.150:8011  (set channel var on FS if IP differs)
     ai_profile_id      explicit profile; wins over DID map
     ai_profile_map     "101=coral-tfn,1800=coral-tfn"  or JSON {"101":"coral-tfn"}
     ai_profiles_file   path to dest→profile file (see ai_profiles.conf)
     ai_peer_rate       default 8000
 ]]
 
-local ORCH_DEFAULT = "http://192.168.25.130:8011"
+local ORCH_DEFAULT = "http://192.168.100.150:8011"
 local PROFILE_DEFAULT = "coral-tfn"
 local PEER_RATE_DEFAULT = "8000"
 local DEFAULT_MAP_FILE = "/etc/coraltele/sipserver/scripts/ai_profiles.conf"
@@ -263,8 +263,8 @@ end
 -- Do NOT uuid_broadcast silence_stream (even via bgapi): it runs playback on the
 -- channel and freezes session:sleep in this Lua script until hangup.
 -- TTS playout uses STREAM_INJECT_READ (module READ path), not silence_stream.
-log("INFO", "media settle wait 800ms")
-session:sleep(800)
+log("INFO", "media settle wait 400ms")
+session:sleep(400)
 
 local answer_url = orch .. "/v1/sessions/" .. sid .. "/answer"
 local bg_ans = string.format(
