@@ -13,11 +13,22 @@
 #include <climits>
 #include <cstdint>
 #include <cctype>
+#include <cstdlib>
 
-#define MOD_AUDIO_STREAM_VERSION "2.0.1"
+#define MOD_AUDIO_STREAM_VERSION "2.1.0"
 
 #define FRAME_SIZE_8000  320
 #define MAX_AUDIO_BASE64_LEN (256 * 1024) /* realtime frames only; reject huge blobs */
+
+/* Shared by the WebSocket thread (arming actions) and the media thread (running
+ * them), so it lives at file scope rather than inside AudioStreamer.
+ */
+static inline void stream_copy_field(char* dst, size_t cap, const char* src) {
+    if (!dst || cap == 0) return;
+    if (!src) { dst[0] = '\0'; return; }
+    std::strncpy(dst, src, cap - 1);
+    dst[cap - 1] = '\0';
+}
 
 class AudioStreamer {
 public:
@@ -130,6 +141,103 @@ private:
 
     static inline void push_err(ProcessResult& out, const std::string& sid, const std::string& s) {
         out.errors.push_back("(" + sid + ") " + s);
+    }
+
+    /* Optional integer field with a default; tolerates string or number JSON. */
+    static inline int json_int(cJSON* root, const char* key, int fallback) {
+        cJSON* item = cJSON_GetObjectItem(root, key);
+        if (!item) return fallback;
+        /* cJSON ORs flags such as cJSON_IsReference into type; mask them off. */
+        const int type = item->type & 0xFF;
+        if (type == cJSON_Number) return item->valueint;
+        if (type == cJSON_String && item->valuestring) {
+            char* end = nullptr;
+            long v = std::strtol(item->valuestring, &end, 10);
+            if (end && end != item->valuestring) return (int)v;
+        }
+        return fallback;
+    }
+
+    /* Dialplan extensions we are willing to hand to the transfer app. Deliberately
+     * narrow: digits, letters and the punctuation FreeSWITCH extensions actually use.
+     */
+    static inline bool valid_extension(const char* s) {
+        if (!s || !*s) return false;
+        size_t n = std::strlen(s);
+        if (n >= STREAM_DEST_MAX) return false;
+        for (size_t i = 0; i < n; i++) {
+            const unsigned char c = (unsigned char)s[i];
+            if (std::isalnum(c)) continue;
+            if (c == '_' || c == '-' || c == '.' || c == '+' || c == '*' || c == '#') continue;
+            return false;
+        }
+        return true;
+    }
+
+    /* Dialplan / context names: identifier characters only. cap is the
+     * destination field size, so a name that would be truncated is rejected
+     * rather than silently shortened into a different context.
+     */
+    static inline bool valid_token(const char* s, size_t cap) {
+        if (!s || !*s) return false;
+        size_t n = std::strlen(s);
+        if (n >= cap) return false;
+        for (size_t i = 0; i < n; i++) {
+            const unsigned char c = (unsigned char)s[i];
+            if (std::isalnum(c) || c == '_' || c == '-') continue;
+            return false;
+        }
+        return true;
+    }
+
+    /* Record a deferred hangup/transfer. Never touches session state here: the
+     * WebSocket event thread is shared with media receive, so it must not block or
+     * re-enter FreeSWITCH channel APIs. The media thread picks this up.
+     */
+    bool arm_pending_action(switch_core_session_t* psession, ProcessResult& out, int action,
+                            int drain_ms, const char* cause, const char* dest,
+                            const char* dialplan, const char* context) {
+        switch_media_bug_t* bug = get_media_bug(psession);
+        if (!bug) {
+            push_err(out, m_sessionId, "action - no media bug");
+            return false;
+        }
+        auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
+        if (!tech_pvt) {
+            push_err(out, m_sessionId, "action - no tech_pvt");
+            return false;
+        }
+        if (drain_ms < 0) drain_ms = 0;
+        if (drain_ms > STREAM_ACTION_MAX_DRAIN_MS) drain_ms = STREAM_ACTION_MAX_DRAIN_MS;
+
+        switch_mutex_t* im = tech_pvt->inject_mutex ? tech_pvt->inject_mutex : tech_pvt->mutex;
+        switch_mutex_lock(im);
+        if (tech_pvt->pending_action != STREAM_ACTION_NONE) {
+            /* First request wins; a second one must not retarget a transfer in flight. */
+            switch_mutex_unlock(im);
+            push_err(out, m_sessionId, "action - already pending");
+            return false;
+        }
+        tech_pvt->pending_action = action;
+        tech_pvt->pending_action_published = 0;
+        tech_pvt->pending_action_deadline = switch_micro_time_now() + (switch_time_t)drain_ms * 1000;
+        stream_copy_field(tech_pvt->pending_cause, sizeof(tech_pvt->pending_cause), cause);
+        stream_copy_field(tech_pvt->pending_dest, sizeof(tech_pvt->pending_dest), dest);
+        stream_copy_field(tech_pvt->pending_dialplan, sizeof(tech_pvt->pending_dialplan), dialplan);
+        stream_copy_field(tech_pvt->pending_context, sizeof(tech_pvt->pending_context), context);
+        switch_mutex_unlock(im);
+
+        if (action == STREAM_ACTION_TRANSFER) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
+                              "(%s) transfer armed dest=%s dialplan=%s context=%s drain_ms=%d\n",
+                              m_sessionId.c_str(), dest ? dest : "", dialplan ? dialplan : "",
+                              context ? context : "", drain_ms);
+        } else {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
+                              "(%s) hangup armed cause=%s drain_ms=%d\n",
+                              m_sessionId.c_str(), cause ? cause : "", drain_ms);
+        }
+        return true;
     }
 
     void bindCallbacks(std::weak_ptr<AudioStreamer> wp) {
@@ -308,6 +416,20 @@ private:
             if (drop > 0) {
                 drop_oldest_from_buffer(tech_pvt->inject_buffer, (switch_size_t)drop);
                 __atomic_fetch_add(&tech_pvt->inject_overflow_drops, (uint64_t)drop, __ATOMIC_RELAXED);
+                /* Overflow means the peer delivered faster than realtime playout — the
+                 * caller loses audio here, so surface it live (throttled) instead of
+                 * only in the end-of-call summary.
+                 */
+                const switch_time_t now = switch_micro_time_now();
+                if (now - tech_pvt->last_overflow_warn > 1000000) {
+                    tech_pvt->last_overflow_warn = now;
+                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                                      "%s inject overflow: dropped %" SWITCH_SIZE_T_FMT
+                                      " bytes (buffer %" SWITCH_SIZE_T_FMT " ms is full; "
+                                      "peer is sending faster than realtime)\n",
+                                      tech_pvt->sessionId, (switch_size_t)drop,
+                                      (switch_size_t)tech_pvt->inject_buffer_ms);
+                }
             }
         }
 
@@ -526,6 +648,61 @@ private:
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
                               "(%s) peer requested stop\n", m_sessionId.c_str());
             media_bug_close(psession);
+            return out;
+        }
+
+        /* ---- control: hangup (peer ends the call after playout drains) ---- */
+        if (jsonType && std::strcmp(jsonType, "hangup") == 0) {
+            out.handled_control = true;
+            const char* cause = cJSON_GetObjectCstr(root.get(), "cause");
+            int drain_ms = json_int(root.get(), "drainMs", STREAM_ACTION_MAX_DRAIN_MS);
+            if (!arm_pending_action(psession, out, STREAM_ACTION_HANGUP, drain_ms,
+                                    cause && *cause ? cause : "NORMAL_CLEARING",
+                                    nullptr, nullptr, nullptr)) {
+                return out;
+            }
+            out.rewrittenJsonData = "{\"type\":\"hangup\",\"status\":\"armed\"}";
+            out.ok = SWITCH_TRUE;
+            return out;
+        }
+
+        /* ---- control: transfer (uuid_transfer equivalent, run by the dialplan app) ---- */
+        if (jsonType && std::strcmp(jsonType, "transfer") == 0) {
+            out.handled_control = true;
+            const char* dest = cJSON_GetObjectCstr(root.get(), "dest");
+            if (!dest) dest = cJSON_GetObjectCstr(root.get(), "destination");
+            const char* dialplan = cJSON_GetObjectCstr(root.get(), "dialplan");
+            const char* context = cJSON_GetObjectCstr(root.get(), "context");
+            int drain_ms = json_int(root.get(), "drainMs", STREAM_ACTION_MAX_DRAIN_MS);
+
+            if (!dest || !*dest) {
+                push_err(out, m_sessionId, "transfer - missing dest");
+                out.rewrittenJsonData = "{\"type\":\"transfer\",\"status\":\"error\",\"error\":\"missing dest\"}";
+                return out;
+            }
+            if (!valid_extension(dest)) {
+                push_err(out, m_sessionId, "transfer - illegal dest");
+                out.rewrittenJsonData = "{\"type\":\"transfer\",\"status\":\"error\",\"error\":\"illegal dest\"}";
+                return out;
+            }
+            if (dialplan && *dialplan && !valid_token(dialplan, STREAM_DIALPLAN_MAX)) {
+                push_err(out, m_sessionId, "transfer - illegal dialplan");
+                out.rewrittenJsonData = "{\"type\":\"transfer\",\"status\":\"error\",\"error\":\"illegal dialplan\"}";
+                return out;
+            }
+            if (context && *context && !valid_token(context, STREAM_CONTEXT_MAX)) {
+                push_err(out, m_sessionId, "transfer - illegal context");
+                out.rewrittenJsonData = "{\"type\":\"transfer\",\"status\":\"error\",\"error\":\"illegal context\"}";
+                return out;
+            }
+            if (!arm_pending_action(psession, out, STREAM_ACTION_TRANSFER, drain_ms,
+                                    nullptr, dest,
+                                    dialplan && *dialplan ? dialplan : "XML",
+                                    context && *context ? context : "calltransfer")) {
+                return out;
+            }
+            out.rewrittenJsonData = "{\"type\":\"transfer\",\"status\":\"armed\"}";
+            out.ok = SWITCH_TRUE;
             return out;
         }
 
@@ -1310,10 +1487,129 @@ extern "C" {
 
         if (switch_core_session_write_frame(session, &write_frame, SWITCH_IO_FLAG_NONE, 0)
             == SWITCH_STATUS_SUCCESS) {
-            __atomic_fetch_add(&tech_pvt->inject_bytes_written, (uint64_t)got, __ATOMIC_RELAXED);
+            /* Played out, not produced: this is the read side of the inject buffer. */
+            __atomic_fetch_add(&tech_pvt->inject_bytes_read, (uint64_t)got, __ATOMIC_RELAXED);
         }
 
         return SWITCH_TRUE;
+    }
+
+    /* Run a deferred hangup/transfer once queued playout has drained (or the guard
+     * deadline expires). Called from the media bug READ path, i.e. the session's own
+     * thread — the only context where it is safe to change channel state.
+     *
+     * Returns SWITCH_FALSE when the bug should be torn down (action executed).
+     */
+    switch_bool_t stream_service_pending_action(switch_media_bug_t *bug) {
+        switch_core_session_t *session = switch_core_media_bug_get_session(bug);
+        private_t *tech_pvt = (private_t *)switch_core_media_bug_get_user_data(bug);
+
+        if (!session || !tech_pvt || tech_pvt->cleanup_started) {
+            return SWITCH_TRUE;
+        }
+        if (tech_pvt->pending_action == STREAM_ACTION_NONE || tech_pvt->pending_action_published) {
+            return SWITCH_TRUE;
+        }
+
+        const int rate = tech_pvt->inject_sample_rate > 0 ? tech_pvt->inject_sample_rate : 8000;
+        const int ch = tech_pvt->channels > 0 ? tech_pvt->channels : 1;
+        const int frame_ms = tech_pvt->frame_ms > 0 ? tech_pvt->frame_ms : FRAME_MS_DEFAULT;
+        const size_t frame_bytes = pcm16_bytes_per_ms(rate, ch) * (size_t)frame_ms;
+
+        const switch_time_t now = switch_micro_time_now();
+        const switch_bool_t expired = (tech_pvt->pending_action_deadline > 0 &&
+                                       now >= tech_pvt->pending_action_deadline)
+                                      ? SWITCH_TRUE : SWITCH_FALSE;
+
+        int action = STREAM_ACTION_NONE;
+        char cause[STREAM_CAUSE_MAX] = {0};
+        char dest[STREAM_DEST_MAX] = {0};
+        char dialplan[STREAM_DIALPLAN_MAX] = {0};
+        char context[STREAM_CONTEXT_MAX] = {0};
+
+        switch_mutex_t *im = tech_pvt->inject_mutex ? tech_pvt->inject_mutex : tech_pvt->mutex;
+        if (switch_mutex_trylock(im) != SWITCH_STATUS_SUCCESS) {
+            /* Contended: try again on the next 20 ms tick. */
+            return SWITCH_TRUE;
+        }
+        const switch_size_t inuse = tech_pvt->inject_buffer
+                                    ? switch_buffer_inuse(tech_pvt->inject_buffer) : 0;
+        const switch_bool_t drained = (frame_bytes == 0 || inuse < frame_bytes)
+                                      ? SWITCH_TRUE : SWITCH_FALSE;
+        if (drained == SWITCH_TRUE || expired == SWITCH_TRUE) {
+            action = tech_pvt->pending_action;
+            stream_copy_field(cause, sizeof(cause), tech_pvt->pending_cause);
+            stream_copy_field(dest, sizeof(dest), tech_pvt->pending_dest);
+            stream_copy_field(dialplan, sizeof(dialplan), tech_pvt->pending_dialplan);
+            stream_copy_field(context, sizeof(context), tech_pvt->pending_context);
+            tech_pvt->pending_action_published = 1;
+        }
+        switch_mutex_unlock(im);
+
+        if (action == STREAM_ACTION_NONE) {
+            return SWITCH_TRUE;
+        }
+
+        switch_channel_t *channel = switch_core_session_get_channel(session);
+        if (!channel) {
+            return SWITCH_TRUE;
+        }
+
+        /* Publish intent as channel variables + an event before acting, so the
+         * dialplan app and CDRs can see what the peer asked for even if the
+         * channel disappears immediately afterwards.
+         */
+        if (action == STREAM_ACTION_TRANSFER) {
+            switch_channel_set_variable(channel, STREAM_DEST_VAR, dest);
+            switch_channel_set_variable(channel, STREAM_DIALPLAN_VAR, dialplan);
+            switch_channel_set_variable(channel, STREAM_CONTEXT_VAR, context);
+            switch_channel_set_variable(channel, STREAM_ACTION_VAR, "transfer");
+        } else {
+            switch_channel_set_variable(channel, STREAM_CAUSE_VAR, cause);
+            switch_channel_set_variable(channel, STREAM_ACTION_VAR, "hangup");
+        }
+
+        if (expired == SWITCH_TRUE && drained == SWITCH_FALSE) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                              "(%s) action drain deadline hit with %" SWITCH_SIZE_T_FMT
+                              " bytes still queued; proceeding\n",
+                              tech_pvt->sessionId, inuse);
+        }
+
+        tech_pvt->close_requested = 1;
+
+        /* The caller may have hung up while we were draining. Publishing the
+         * variables above is still useful for the CDR, but there is nothing left
+         * to transfer or release.
+         */
+        if (!switch_channel_up(channel)) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                              "(%s) channel already down; skipping %s\n", tech_pvt->sessionId,
+                              action == STREAM_ACTION_TRANSFER ? "transfer" : "hangup");
+            return SWITCH_FALSE;
+        }
+
+        if (action == STREAM_ACTION_TRANSFER) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+                              "(%s) executing transfer (uuid_transfer %s %s %s %s)\n",
+                              tech_pvt->sessionId, tech_pvt->sessionId, dest, dialplan, context);
+            /* In-process equivalent of `uuid_transfer <uuid> <dest> <dialplan> <context>`.
+             * We are already on the session thread, so this is the same context the
+             * `transfer` dialplan app runs in — no second session lookup required.
+             */
+            switch_ivr_session_transfer(session, dest, dialplan, context);
+        } else {
+            switch_call_cause_t c = switch_channel_str2cause(cause);
+            if (c == SWITCH_CAUSE_NONE) {
+                c = SWITCH_CAUSE_NORMAL_CLEARING;
+            }
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+                              "(%s) executing hangup cause=%s\n", tech_pvt->sessionId, cause);
+            switch_channel_hangup(channel, c);
+        }
+
+        /* Detach the bug: this call leg is no longer ours. */
+        return SWITCH_FALSE;
     }
 
     switch_status_t stream_session_cleanup(switch_core_session_t *session, char* text, int channelIsClosing) {

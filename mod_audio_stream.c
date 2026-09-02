@@ -57,6 +57,15 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug,
             if (tech_pvt->inject_read_mode) {
                 playout_inject_frame(bug);
             }
+            /* Peer-requested hangup/transfer runs here: this is the session thread,
+             * the only place channel state may be changed safely. It waits for
+             * queued playout to drain so closing prompts are not truncated.
+             */
+            if (tech_pvt->pending_action != STREAM_ACTION_NONE) {
+                if (stream_service_pending_action(bug) == SWITCH_FALSE) {
+                    return SWITCH_FALSE;
+                }
+            }
             return ok;
         }
 

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.18)
 project(mod_audio_stream
-        VERSION 2.0.0
+        VERSION 2.1.0
         DESCRIPTION "FreeSWITCH feeder/sink audio streaming module (no AI)."
         HOMEPAGE_URL "https://github.com/TAGisON/mod_audio_stream-1")
 

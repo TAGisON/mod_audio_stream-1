@@ -16,11 +16,46 @@ local ORCH_DEFAULT = "http://192.168.25.130:8011"
 local PROFILE_DEFAULT = "coral-tfn"
 local PEER_RATE_DEFAULT = "8000"
 local DEFAULT_MAP_FILE = "/etc/coraltele/sipserver/scripts/ai_profiles.conf"
+-- Local fallback prompts, played when the orchestrator itself cannot be reached.
+-- Failures *inside* a live session are handled by the orchestrator, which streams
+-- its own fallback audio over the media path and then asks us to hang up.
+local FALLBACK_DIR_DEFAULT = "/usr/local/share/ai-orchestrator/fallback"
 -- Avoid curl HTTP keep-alive stalls on voip (2nd GET can block ~60s without this).
 local CURL_OPTS = "-H 'Connection: close' --no-keepalive"
 
 local function log(level, msg)
   freeswitch.consoleLog(level, "[ai_voice_bot] " .. msg .. "\n")
+end
+
+local function file_exists(path)
+  if not path or path == "" then return false end
+  local f = io.open(path, "r")
+  if not f then return false end
+  f:close()
+  return true
+end
+
+-- Play the local prompt for `scenario` (falling back to generic.wav) and hang up.
+-- Never raises: a missing prompt degrades to a bare hangup with the right cause.
+local function fail_call(scenario, cause)
+  cause = cause or "NORMAL_TEMPORARY_FAILURE"
+  local dir = session:getVariable("ai_fallback_dir")
+  if dir == nil or dir == "" then dir = FALLBACK_DIR_DEFAULT end
+  dir = tostring(dir):gsub("/+$", "")
+
+  local candidates = { dir .. "/" .. scenario .. ".wav", dir .. "/generic.wav" }
+  for _, path in ipairs(candidates) do
+    if file_exists(path) then
+      log("WARNING", "playing local fallback " .. path .. " (" .. scenario .. ")")
+      if not session:answered() then session:answer() end
+      -- streamFile blocks until playout completes; nothing else owns the channel here.
+      session:streamFile(path)
+      break
+    end
+  end
+
+  session:setVariable("ai_failure_scenario", scenario)
+  session:hangup(cause)
 end
 
 local function json_escape(s)
@@ -176,15 +211,20 @@ log("INFO", "creating session profile=" .. profile .. " via=" .. profile_src ..
 local resp, err = curl_post(orch .. "/v1/sessions", create_body, 8)
 if err or not resp or resp == "" then
   log("ERR", "session create failed: " .. tostring(err or "empty"))
-  session:hangup("NORMAL_TEMPORARY_FAILURE")
+  fail_call("ai_unavailable", "NORMAL_TEMPORARY_FAILURE")
   return
 end
 
 local sid = resp:match('"session_id"%s*:%s*"([^"]+)"')
 local tok = resp:match('"edge_token"%s*:%s*"([^"]+)"')
 if not sid or not tok then
+  -- A well-formed error body (quota, auth, no capacity) still lands here; surface it.
   log("ERR", "parse session create: " .. resp:sub(1, 400))
-  session:hangup("NORMAL_TEMPORARY_FAILURE")
+  local scenario = "ai_unavailable"
+  if resp:match("credit") or resp:match("quota") or resp:match("payment") then
+    scenario = "credits_exhausted"
+  end
+  fail_call(scenario, "NORMAL_TEMPORARY_FAILURE")
   return
 end
 
@@ -200,7 +240,7 @@ session:setVariable("STREAM_INJECT_READ", "1")
 local orch_host = orch:match("^https?://([^/]+)")
 if not orch_host then
   log("ERR", "invalid ai_orch_url: " .. orch)
-  session:hangup("NORMAL_TEMPORARY_FAILURE")
+  fail_call("internal_error", "NORMAL_TEMPORARY_FAILURE")
   return
 end
 
@@ -216,7 +256,7 @@ log("INFO", "uuid_audio_stream: " .. tostring(stream_res))
 if not stream_res or stream_res:match("^%-ERR") or stream_res:match("INVALID COMMAND") then
   log("ERR", "audio stream start failed: " .. tostring(stream_res))
   curl_post(orch .. "/v1/sessions/" .. sid .. "/stop", '{"reason":"stream_failed"}', 8)
-  session:hangup("NORMAL_TEMPORARY_FAILURE")
+  fail_call("internal_error", "NORMAL_TEMPORARY_FAILURE")
   return
 end
 
@@ -236,10 +276,27 @@ api:execute("bgapi", "system " .. bg_ans)
 log("INFO", "answer dispatched (bgapi)")
 
 session:setAutoHangup(false)
+-- The module performs peer-requested hangup/transfer itself on the session thread
+-- (see stream_service_pending_action); we poll ai_action only so the stop reason
+-- we report is accurate, and so a transfer breaks us out promptly.
+local action = ""
 while session:ready() do
-  session:sleep(500)
+  action = var("ai_action")
+  if action ~= "" then
+    log("INFO", "peer action: " .. action)
+    break
+  end
+  session:sleep(200)
 end
 
-log("INFO", "call ended, stopping session " .. sid)
-curl_post(orch .. "/v1/sessions/" .. sid .. "/stop", '{"reason":"hangup"}', 8)
+local stop_reason = "hangup"
+if action == "transfer" then
+  stop_reason = "transferred"
+elseif action == "hangup" then
+  stop_reason = "peer_hangup"
+end
+
+log("INFO", "call ended (" .. stop_reason .. "), stopping session " .. sid)
+curl_post(orch .. "/v1/sessions/" .. sid .. "/stop",
+  string.format('{"reason":%s}', jstr(stop_reason)), 8)
 api:execute("uuid_audio_stream", uuid .. " stop")
