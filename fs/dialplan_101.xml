@@ -9,7 +9,7 @@
     <action application="set" data="hangup_after_bridge=false"/>
     <action application="set" data="ai_orch_url=http://192.168.100.150:8011"/>
     <action application="set" data="ai_peer_rate=8000"/>
-    <!-- profile from ai_profiles.conf (101=coral-tfn); set ai_profile_id to override -->
+    <!-- profile from ai_profiles.conf (101=coral-xfer); set ai_profile_id to override -->
     <action application="lua" data="ai_voice_bot.lua"/>
   </condition>
 </extension>

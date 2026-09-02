@@ -85,7 +85,7 @@ Queued into the per-call inject buffer → `WRITE_REPLACE` on the call.
 
 | Direction | Message | Behaviour |
 |---|---|---|
-| peer → module | `{"type":"flush"}` | Clear inject buffer (barge-in) |
+| peer → module | `{"type":"flush"}` | **Dumb** clear of inject buffer only. Orchestrator owns barge/VAD; the module never decides product barge — it only drops queued TTS PCM when told. |
 | peer → module | `{"type":"stop"}` | Close media bug / end stream |
 | peer → module | `{"type":"hangup",…}` | Release the call after playout drains |
 | peer → module | `{"type":"transfer",…}` | Blind-transfer the leg after playout drains |

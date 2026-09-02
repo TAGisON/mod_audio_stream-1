@@ -96,11 +96,12 @@ Call **101** again — log must show `EXECUTE ... lua(ai_voice_bot.lua)`, not `t
 Edit `ai_profiles.conf` for each inbound number:
 
 ```
-101=coral-tfn
-1800123456=coral-tfn
+101=coral-xfer
+1800123456=coral-xfer
 ```
 
-If dialplan is **xml_curl**, keep the 101 interceptor but **do not hardcode** `ai_profile_id` unless you want to override the file. Lua reads destination and the map.
+Default profile when the DID is unmapped: `coral-xfer` (simple transfer desk). Legacy
+`coral-tfn` remains installable on the orchestrator for guided TFN trees.
 
 Reload is not required for Lua/file edits (next call picks them up). After changing `xml_curl.conf.xml`, `reload mod_xml_curl`.
 
@@ -109,10 +110,10 @@ Reload is not required for Lua/file edits (next call picks them up). After chang
 | Source | Meaning |
 |---|---|
 | `ai_profile_id` | Explicit profile (wins) |
-| `ai_profile_map` | `101=coral-tfn,102=other` or JSON `{"101":"coral-tfn"}` |
+| `ai_profile_map` | `101=coral-xfer,102=other` or JSON `{"101":"coral-xfer"}` |
 | `ai_profiles_file` | Alternate path to dest→profile file |
 | `/etc/coraltele/sipserver/scripts/ai_profiles.conf` | Default DID map |
-| default | `coral-tfn` (Coral Telecom Toll-Free Desk) |
+| default | `coral-xfer` (Coral Telecom simple transfer desk) |
 | `ai_orch_url` | default `http://192.168.25.130:8011` (override per deploy) |
 | `ai_peer_rate` | default `8000` |
 
@@ -123,7 +124,7 @@ Posted on session create (stored + `session.started` audit):
 
 ## Test
 
-Call **101**. Supervisor: http://192.168.25.130:8011/supervisor/ — profile `coral-tfn`, caller/metadata on the session JSON.
+Call **101**. Supervisor: http://192.168.25.130:8011/supervisor/ — profile `coral-xfer`, caller/metadata on the session JSON.
 
 ```bash
 grep ai_voice_bot /etc/coraltele/sipserver/log/freeswitch.log | tail -20

@@ -60,7 +60,10 @@ dialplan integration (see `mod_audio_stream-upstream/CLAUDE.md` for how the two 
 - Touch this repo for the FreeSWITCH-side transport: media bug capture/injection, the
   WebSocket wire protocol to aiorchestrator, buffering/jitter/heartbeat channel variables, or
   the `fs/` dialplan scripts that wire a DID to an AI profile.
-- Do not add STT/LLM/TTS logic here — that belongs in `com.coraltele.aiorchestrator`.
+- Do not add STT/LLM/TTS, barge policy, language, intent, or transfer product logic here —
+  that belongs in `com.coraltele.aiorchestrator`. This module is a **dumb pipe**: uplink PCM,
+  downlink inject, and a **dumb** `flush` that only clears the inject buffer when the
+  orchestrator asks.
 - **`mod_audio_stream-upstream` is a separate sibling checkout of the original, unmodified
   open-source project** (different GitHub remote, no shared commit history) — use it as a
   read-only reference for diffing against upstream behavior, not as a branch/remote of this

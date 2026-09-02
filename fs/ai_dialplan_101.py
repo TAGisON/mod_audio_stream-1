@@ -2,7 +2,7 @@
 """xml_curl front door: dest 101 → AI bot Lua; anything else → 404 so Coral handles it.
 
 Do not set ai_profile_id here. Lua + /etc/coraltele/sipserver/scripts/ai_profiles.conf
-choose the desk (101 → coral-tfn).
+choose the desk (101 → coral-xfer).
 """
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs

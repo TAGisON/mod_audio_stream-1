@@ -7,13 +7,13 @@
   Channel vars (optional, set before lua):
     ai_orch_url        default http://192.168.100.150:8011  (set channel var on FS if IP differs)
     ai_profile_id      explicit profile; wins over DID map
-    ai_profile_map     "101=coral-tfn,1800=coral-tfn"  or JSON {"101":"coral-tfn"}
+    ai_profile_map     "101=coral-xfer,1800=coral-xfer"  or JSON {"101":"coral-xfer"}
     ai_profiles_file   path to dest→profile file (see ai_profiles.conf)
     ai_peer_rate       default 8000
 ]]
 
 local ORCH_DEFAULT = "http://192.168.100.150:8011"
-local PROFILE_DEFAULT = "coral-tfn"
+local PROFILE_DEFAULT = "coral-xfer"
 local PEER_RATE_DEFAULT = "8000"
 local DEFAULT_MAP_FILE = "/etc/coraltele/sipserver/scripts/ai_profiles.conf"
 -- Local fallback prompts, played when the orchestrator itself cannot be reached.
@@ -232,7 +232,8 @@ session:setVariable("ai_session_id", sid)
 session:setVariable("ai_profile_id", profile)
 log("INFO", "session " .. sid)
 
--- Keep inject buffer small so barge-in flush clears residual playout quickly (module: 40..5000).
+-- Keep inject buffer small so orch-driven dumb flush clears residual playout quickly (module: 40..5000).
+-- Product barge/VAD lives in the orchestrator; this buffer size only limits leftover TTS after flush.
 session:setVariable("STREAM_INJECT_BUFFER_MS", "500")
 -- Unbridged Lua legs: WRITE_REPLACE rarely fires; drain inject on READ instead.
 session:setVariable("STREAM_INJECT_READ", "1")
